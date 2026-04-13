@@ -1,0 +1,64 @@
+# Daml / Canton
+.daml/
+.dpm/
+*.dar
+
+# Node.js
+node_modules/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnp/
+.pnp.js
+
+# TypeScript / JavaScript Build Output
+dist/
+build/
+out/
+lib/
+*.js
+*.js.map
+*.tsbuildinfo
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Rust / Cargo
+target/
+Cargo.lock
+# For generated bindings
+bindings/
+
+# ZK Proofs (Circom, etc.)
+# Compiled circuits
+*.r1cs
+*.sym
+*.wasm
+# Proving keys
+*.zkey
+# Witness files
+witness.wtns
+# Verification key
+verification_key.json
+# Proof data
+proof.json
+public.json
+
+# IDE / Editor specific
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Logs
+logs
+*.log
+
+# OS-specific
+Thumbs.db
+ehthumbs.db
