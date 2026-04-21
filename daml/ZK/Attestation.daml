@@ -1,0 +1,79 @@
+-- | This module defines the core `Attestation` template for storing and managing
+-- | Zero-Knowledge (ZK) proofs on the ledger.
+-- |
+-- | An `Attestation` contract represents a verifiable claim made by a `prover`
+-- | to a `verifier`. The claim is substantiated by a cryptographic ZK proof,
+-- | which allows the `prover` to demonstrate a fact about their private data
+-- | without revealing the data itself.
+-- |
+-- | Example use cases include:
+-- | - Proving a portfolio's value-at-risk (VaR) is below a certain threshold.
+-- | - Attesting to KYC/AML compliance without revealing personal identity data.
+-- | - Demonstrating sufficient collateralization for a loan.
+module ZK.Attestation where
+
+import Daml.Finance.Interface.Util.Disclosure qualified as Disclosure
+import DA.Text (Text, isEmpty)
+import DA.Assert (assertMsg)
+
+-- | Represents a zero-knowledge proof attestation on the ledger.
+-- | The `prover` creates this contract to present a ZK proof to a `verifier`.
+-- | The `verifier` can observe this contract and perform off-chain verification
+-- | using the provided `proof`, `publicInputs`, and `circuitId`.
+template Attestation
+  with
+    prover: Party
+      -- ^ The party who generated and submitted the ZK proof.
+    verifier: Party
+      -- ^ The party intended to receive and verify the proof.
+    circuitId: Text
+      -- ^ A unique identifier for the ZK circuit used to generate this proof.
+      -- ^ This informs the verifier which verification key and logic to use.
+      -- ^ Example: "kyc-aml-check-v1.2".
+    publicInputs: Text
+      -- ^ The public inputs to the ZK circuit, typically serialized as a JSON string.
+      -- ^ These are the public values that the proof is attesting to.
+      -- ^ Example: `{"subject": "Alice::1220...", "verified_at_ts": "1672531200"}`.
+    proof: Text
+      -- ^ The cryptographic zero-knowledge proof data, encoded as a string
+      -- ^ (e.g., Base64 or Hex). This is the core evidence to be verified off-chain.
+    attestationId: Text
+      -- ^ A unique identifier for this specific attestation instance, useful for
+      -- ^ tracking and correlation with off-chain systems.
+
+  where
+    signatory prover
+    observer verifier
+
+    key (prover, attestationId) : (Party, Text)
+    maintainer key._1
+
+    ensure
+      let
+        nonEmpty s msg = assertMsg msg (not $ isEmpty s)
+      in
+        nonEmpty circuitId "Circuit ID cannot be empty." >>
+        nonEmpty publicInputs "Public inputs cannot be empty." >>
+        nonEmpty proof "Proof data cannot be empty." >>
+        nonEmpty attestationId "Attestation ID cannot be empty."
+
+    -- | A choice for the verifier to signal acknowledgement of the attestation.
+    -- | This does not imply the proof is cryptographically valid, only that it has
+    -- | been received and processed. The actual verification happens off-chain.
+    -- | This choice is non-consuming, creating a ledger event without archiving
+    -- | the attestation itself.
+    nonconsuming choice Acknowledge : ()
+      controller verifier
+      do
+        return ()
+
+    -- | Allows the prover to revoke and archive their attestation. This might be
+    -- | used when the attestation is superseded by a newer one or is no longer valid.
+    choice Revoke : ()
+      controller prover
+      do
+        return ()
+
+    interface instance Disclosure.I for Attestation where
+      view = Disclosure.View with disclosureControllers = singleton prover
+      setObservers = Disclosure.setObservers
