@@ -1,0 +1,171 @@
+-- |
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+--
+
+module ZK.Verifier where
+
+import Daml.Script
+import DA.Set (Set)
+import qualified DA.Set as Set
+import DA.Text (Text)
+import DA.Time (Time)
+
+import ZK.Attestation (VerifiedAttestation)
+
+-- | Represents the public verification key for a Groth16 zk-SNARK circuit.
+-- In a real implementation, these Text fields would contain serialized elliptic
+-- curve points (e.g., in base64). Daml itself doesn't perform the cryptographic
+-- operations, but it can store the necessary data for an external verifier/oracle.
+data VerificationKey = VerificationKey
+  { alpha1 : Text
+  , beta2 : Text
+  , gamma2 : Text
+  , delta2 : Text
+  , ic : [Text]
+  } deriving (Eq, Show, Ord)
+
+-- | Represents a Groth16 proof.
+-- As with the VerificationKey, these are serialized elliptic curve points.
+data Proof = Proof
+  { pi_a : Text
+  , pi_b : Text
+  , pi_c : Text
+  } deriving (Eq, Show, Ord)
+
+-- | A type alias for public inputs, which are a list of text values.
+-- These are the public values that the ZK proof is attesting to,
+-- without revealing the private witness values.
+type PublicInputs = [Text]
+
+-- | Simulates the cryptographic verification of a Groth16 proof.
+--
+-- Daml is a deterministic environment and does not have native support for the
+-- complex elliptic curve operations (bilinear pairings) required for zk-SNARK
+-- verification. In a production Canton environment, this logic would be
+-- handled by a trusted oracle or a specialized verifier domain that can perform
+-- the computation off-ledger and attest to the result on-ledger.
+--
+-- This function serves as a placeholder to allow the on-ledger workflow to
+-- proceed, always returning `True` to indicate successful verification.
+mockVerify : VerificationKey -> Proof -> PublicInputs -> Bool
+mockVerify _ _ _ = True
+
+-- | The Verifier template represents a trusted entity's capability to verify
+-- a specific type of ZK proof. It holds the verification key for a particular
+-- circuit (e.g., "proof of over-collateralization") and can be used by
+-- provers to generate `VerifiedAttestation` contracts.
+template Verifier
+  with
+    verifier : Party
+      -- ^ The trusted party that deploys and manages this verifier.
+    description : Text
+      -- ^ A human-readable description of what this verifier proves (e.g., "Proof of Balance > $1M USD").
+    verificationKey : VerificationKey
+      -- ^ The public key needed to verify proofs for the associated circuit.
+    observers : Set Party
+      -- ^ Parties who can see this Verifier and request proof verification.
+  where
+    signatory verifier
+    observer observers
+
+    key verifier : Party
+    maintainer key
+
+    -- | Allows a prover (who must be in the `observers` set) to submit a proof
+    -- for verification. If the proof is valid, a `VerifiedAttestation` contract
+    -- is created and shared with the specified viewers.
+    nonconsuming choice RequestVerification : ContractId VerifiedAttestation
+      with
+        prover : Party
+          -- ^ The party whose data is being proven.
+        viewers : Set Party
+          -- ^ Parties who will be able to see the resulting `VerifiedAttestation`.
+          --   The prover and verifier are implicitly included.
+        proof : Proof
+          -- ^ The ZK proof generated off-ledger by the prover.
+        publicInputs : PublicInputs
+          -- ^ The public inputs associated with the proof.
+      controller prover
+      do
+        -- Ensure the party requesting verification is authorized to use this verifier.
+        assertMsg (show prover <> " is not an authorized observer of this verifier.")
+          (Set.member prover observers)
+
+        -- Perform the verification. In a real system, this would involve an oracle call.
+        let verificationResult = mockVerify verificationKey proof publicInputs
+        assertMsg "ZK proof verification failed." verificationResult
+
+        -- If verification succeeds, create an attestation contract.
+        now <- getTime
+        create VerifiedAttestation with
+          verifier
+          prover
+          description
+          publicInputs
+          verifiedAt = now
+          -- The viewers of the attestation include the prover, the verifier,
+          -- and any additional parties the prover specified.
+          viewers = Set.insert prover (Set.insert verifier viewers)
+
+    -- | Allows the verifier to archive this Verifier contract, for example, if the
+    -- underlying circuit or key needs to be rotated.
+    choice Archive : ()
+      controller verifier
+      do
+        return ()
+
+
+-- | Setup script for initializing a Verifier contract.
+setup : Script ()
+setup = script do
+  -- Allocate parties
+  verifierParty <- allocatePartyWithHint "Verifier" (PartyIdHint "verifier")
+  alice <- allocatePartyWithHint "Alice" (PartyIdHint "alice")
+  bob <- allocatePartyWithHint "Bob" (PartyIdHint "bob")
+
+  -- Define a mock verification key. In a real scenario, this would be generated
+  -- by a trusted setup ceremony for a specific ZK circuit.
+  let mockVk = VerificationKey
+        { alpha1 = "G1_POINT_ALPHA"
+        , beta2 = "G2_POINT_BETA"
+        , gamma2 = "G2_POINT_GAMMA"
+        , delta2 = "G2_POINT_DELTA"
+        , ic = ["IC_POINT_1", "IC_POINT_2"]
+        }
+
+  -- Submit the Verifier contract to the ledger.
+  -- Alice and Bob are observers, so they can request verifications.
+  verifierCid <- submit verifierParty do
+    createCmd Verifier with
+      verifier = verifierParty
+      description = "Proof of sufficient collateral (Value > $1,000,000)"
+      verificationKey = mockVk
+      observers = Set.fromList [alice, bob]
+
+  -- Define a mock proof and public inputs that Alice would generate off-ledger.
+  let mockProof = Proof
+        { pi_a = "PROOF_A"
+        , pi_b = "PROOF_B"
+        , pi_c = "PROOF_C"
+        }
+  let mockPublicInputs = ["HASH_OF_ASSETS_12345", "105.5"] -- e.g., Hash of asset portfolio and collateralization ratio %
+
+  -- Alice, as an authorized observer, requests a verification.
+  -- She wants the resulting attestation to be visible to Bob.
+  attestationCid <- submit alice do
+    exerciseCmd verifierCid RequestVerification with
+      prover = alice
+      viewers = Set.singleton bob
+      proof = mockProof
+      publicInputs = mockPublicInputs
+
+  -- Verify that the attestation contract was created and is visible to all specified parties.
+  Some attestation <- queryContractId alice attestationCid
+  debug $ "Created attestation: " <> show attestation
+
+  assert $ attestation.prover == alice
+  assert $ attestation.verifier == verifierParty
+  assert $ Set.member bob attestation.viewers
+
+  return ()
