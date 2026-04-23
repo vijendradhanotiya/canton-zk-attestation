@@ -1,0 +1,211 @@
+module ZKTest where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Text (hashBlake2b256)
+import ZK.ProofRequest
+
+-- Mock data for testing. In a real-world scenario, these would be generated
+-- by a ZK proving system (e.g., Circom/SnarkJS).
+-- The `verifyZkProof` function inside ProofRequest.daml is assumed to be
+-- instrumented to recognize these mock values for testing purposes.
+
+validBalanceThresholdPublicInputs : Text
+validBalanceThresholdPublicInputs =
+  "{ \"balance\": \"10000.00\", \"threshold\": \"5000.00\" }"
+
+validBalanceThresholdPublicInputsHash : Text
+validBalanceThresholdPublicInputsHash = hashBlake2b256 validBalanceThresholdPublicInputs
+
+validKycCredentialPublicInputs : Text
+validKycCredentialPublicInputs =
+  "{ \"issuer\": \"GovernmentAuthority\", \"subject\": \"Alice\", \"isValid\": \"1\" }"
+
+validKycCredentialPublicInputsHash : Text
+validKycCredentialPublicInputsHash = hashBlake2b256 validKycCredentialPublicInputs
+
+-- We use simple strings to represent proofs. The underlying verification logic
+-- is expected to be a black box (e.g., a Daml primitive or external service call).
+-- For this test, we assume the verifier logic accepts these specific strings for
+-- specific circuits.
+validBalanceProof : Text
+validBalanceProof = "VALID_PROOF_FOR_BALANCE_THRESHOLD_CIRCUIT"
+
+validKycProof : Text
+validKycProof = "VALID_PROOF_FOR_KYC_CREDENTIAL_CIRCUIT"
+
+invalidProof : Text
+invalidProof = "INVALID_PROOF_BYTES"
+
+zkTests : Script ()
+zkTests = script do
+  -- === Setup ===
+  verifier <- allocatePartyWithHint "Verifier" (PartyIdHint "verifier")
+  prover <- allocatePartyWithHint "Prover" (PartyIdHint "prover")
+
+  test "Happy Path: Prover submits a valid proof which is successfully verified" do
+    -- 1. Verifier creates a request for a balance threshold proof.
+    let requestId = "req-happy-path-123"
+    requestCid <- submit verifier do
+      createCmd ProofRequest with
+        verifier = verifier
+        prover = prover
+        circuitId = BALANCE_THRESHOLD
+        publicInputsHash = validBalanceThresholdPublicInputsHash
+        requestId = requestId
+
+    -- 2. Prover submits the valid proof and public inputs.
+    attestationCid <- submit prover do
+      exerciseCmd requestCid SubmitProof with
+        publicInputsJson = validBalanceThresholdPublicInputs
+        proofBytes = validBalanceProof
+
+    -- 3. Verify the VerifiedAttestation contract was created correctly.
+    attestation <- fetch attestationCid
+    attestation.verifier === verifier
+    attestation.prover === prover
+    attestation.circuitId === BALANCE_THRESHOLD
+    attestation.publicInputsJson === validBalanceThresholdPublicInputs
+    attestation.requestId === requestId
+
+  test "Failure: Prover submits an invalid proof" do
+    -- 1. Verifier creates a proof request.
+    let requestId = "req-invalid-proof-456"
+    requestCid <- submit verifier do
+      createCmd ProofRequest with
+        verifier
+        prover
+        circuitId = BALANCE_THRESHOLD
+        publicInputsHash = validBalanceThresholdPublicInputsHash
+        requestId
+
+    -- 2. Prover submits an invalid proof. The transaction must fail.
+    submitMustFail prover do
+      exerciseCmd requestCid SubmitProof with
+        publicInputsJson = validBalanceThresholdPublicInputs
+        proofBytes = invalidProof
+
+  test "Failure: Prover submits valid proof with mismatched public inputs" do
+    -- 1. Verifier creates a proof request with a specific inputs hash.
+    let requestId = "req-mismatched-inputs-789"
+    requestCid <- submit verifier do
+      createCmd ProofRequest with
+        verifier
+        prover
+        circuitId = BALANCE_THRESHOLD
+        publicInputsHash = validBalanceThresholdPublicInputsHash
+        requestId
+
+    -- 2. Prover submits different public inputs than what the hash corresponds to.
+    let mismatchedPublicInputs = "{ \"balance\": \"9999.00\", \"threshold\": \"5000.00\" }"
+    submitMustFail prover do
+      exerciseCmd requestCid SubmitProof with
+        publicInputsJson = mismatchedPublicInputs
+        proofBytes = validBalanceProof
+
+  test "Failure: Prover submits a valid proof for the wrong circuit" do
+    -- This test simulates submitting a valid KYC proof to a request that expects
+    -- a balance proof. The underlying `verifyZkProof` function is expected
+    -- to fail verification because the proof does not match the specified circuitId.
+
+    -- 1. Verifier creates a request for a BALANCE_THRESHOLD proof.
+    let requestId = "req-wrong-circuit-abc"
+    requestCid <- submit verifier do
+      createCmd ProofRequest with
+        verifier
+        prover
+        circuitId = BALANCE_THRESHOLD
+        publicInputsHash = validBalanceThresholdPublicInputsHash
+        requestId
+
+    -- 2. Prover submits a proof that is valid, but for the KYC_CREDENTIAL circuit.
+    --    The verifier logic should reject this because the proof is invalid for the
+    --    requested circuit.
+    submitMustFail prover do
+      exerciseCmd requestCid SubmitProof with
+        publicInputsJson = validBalanceThresholdPublicInputs -- Inputs match the hash
+        proofBytes = validKycProof -- But proof is for a different circuit
+
+  test "Full Workflow: Request, prove, then reference attestation" do
+    -- This tests a more complete lifecycle where the attestation is used as a
+    -- prerequisite for another action, without being consumed.
+    -- We define a hypothetical `LoanOffer` template inline for this test.
+
+    -- 1. Setup parties and initial proof request for KYC.
+    lender <- allocatePartyWithHint "Lender" (PartyIdHint "lender")
+    borrower <- allocatePartyWithHint "Borrower" (PartyIdHint "borrower")
+    kycProvider <- allocatePartyWithHint "KycProvider" (PartyIdHint "kyc-provider")
+
+    let kycRequestId = "kyc-req-for-loan-001"
+    kycRequestCid <- submit kycProvider do
+      createCmd ProofRequest with
+        verifier = kycProvider
+        prover = borrower
+        circuitId = KYC_CREDENTIAL
+        publicInputsHash = validKycCredentialPublicInputsHash
+        requestId = kycRequestId
+
+    -- 2. Borrower provides the KYC proof.
+    kycAttestationCid <- submit borrower do
+      exerciseCmd kycRequestCid SubmitProof with
+        publicInputsJson = validKycCredentialPublicInputs
+        proofBytes = validKycProof
+
+    -- 3. Lender, having seen the attestation, offers a loan that requires it.
+    let
+      -- Simple consumer template for the test
+      template LoanOffer
+        with
+          lender   : Party
+          borrower : Party
+          amount   : Decimal
+          requiredAttestationCid : ContractId VerifiedAttestation
+        where
+          signatory lender
+          observer borrower
+
+          choice AcceptLoan : ContractId LoanAgreement
+            controller borrower
+            do
+              -- Borrower proves they hold the required KYC attestation by fetching it.
+              -- This fetch acts as an authorization check.
+              attestation <- fetch requiredAttestationCid
+              -- Additional assertions ensure the attestation is for the right person
+              -- and for the correct proof type (KYC).
+              attestation.prover === borrower
+              attestation.circuitId === KYC_CREDENTIAL
+              create LoanAgreement with lender, borrower, amount
+
+      template LoanAgreement
+        with
+          lender   : Party
+          borrower : Party
+          amount   : Decimal
+        where
+          signatory lender, borrower
+
+    loanOfferCid <- submit lender do
+      createCmd LoanOffer with
+        lender
+        borrower
+        amount = 100000.0
+        requiredAttestationCid = kycAttestationCid
+
+    -- 4. Borrower accepts the loan. This atomically checks for the attestation
+    --    and creates the final agreement.
+    loanAgreementCid <- submit borrower do
+      exerciseCmd loanOfferCid AcceptLoan
+
+    -- 5. Verify the final state.
+    Some loanAgreement <- queryContractId borrower loanAgreementCid
+    loanAgreement.lender === lender
+    loanAgreement.borrower === borrower
+    loanAgreement.amount === 100000.0
+
+    -- Verify the offer is consumed.
+    None <- queryContractId borrower loanOfferCid
+
+    -- The attestation is NOT consumed in this pattern, it's just referenced.
+    -- This is often desirable, as proofs can be reused for multiple purposes.
+    Some _ <- queryContractId borrower kycAttestationCid
+    return ()
